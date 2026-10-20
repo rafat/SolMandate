@@ -91,7 +91,7 @@ pub fn pay_exact_handler(ctx: Context<PayExact>, amount: u64) -> Result<()> {
         to: ctx.accounts.merchant_token_account.to_account_info(),
         authority: ctx.accounts.vault.to_account_info(),
     };
-    let cpi_ctx = CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info(), cpi_accounts, signer);
+    let cpi_ctx = CpiContext::new_with_signer(ctx.accounts.token_program.key(), cpi_accounts, signer);
     token_interface::transfer_checked(cpi_ctx, amount, ctx.accounts.token_mint.decimals)?;
 
     Ok(())
