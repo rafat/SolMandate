@@ -1,0 +1,24 @@
+{
+  "name": "@solmandate/sdk",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "echo \"SDK tests\""
+  },
+  "dependencies": {
+    "@anchor-lang/core": "^1.2.1",
+    "@solana/spl-token": "^0.4.15",
+    "@solana/web3.js": "^1.95.5",
+    "@solmandate/verifier": "workspace:*",
+    "@x402/core": "^2.28.0",
+    "@x402/fetch": "^2.28.0",
+    "bn.js": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.1.5",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.3"
+  }
+}

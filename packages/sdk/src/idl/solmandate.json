@@ -1,0 +1,1520 @@
+{
+  "address": "CBuziEesW1tEjs1vbY6pnXVRMzmqwvjuEJty8UQdCyD8",
+  "metadata": {
+    "name": "solmandate",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Created with Anchor"
+  },
+  "instructions": [
+    {
+      "name": "approve_request",
+      "discriminator": [
+        89,
+        68,
+        167,
+        104,
+        93,
+        25,
+        178,
+        205
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "vault"
+          ]
+        },
+        {
+          "name": "vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          },
+          "relations": [
+            "mandate"
+          ]
+        },
+        {
+          "name": "mandate",
+          "writable": true,
+          "relations": [
+            "pending_approval"
+          ]
+        },
+        {
+          "name": "pending_approval",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  110,
+                  100,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mandate"
+              },
+              {
+                "kind": "account",
+                "path": "pending_approval.payment_id",
+                "account": "PendingApproval"
+              }
+            ]
+          }
+        },
+        {
+          "name": "escrow",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mandate"
+              },
+              {
+                "kind": "account",
+                "path": "pending_approval.payment_id",
+                "account": "PendingApproval"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "deadline",
+          "type": "i64"
+        }
+      ]
+    },
+    {
+      "name": "claim_after_timeout",
+      "discriminator": [
+        90,
+        0,
+        225,
+        186,
+        150,
+        114,
+        231,
+        76
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "relations": [
+            "mandate"
+          ]
+        },
+        {
+          "name": "mandate",
+          "writable": true,
+          "relations": [
+            "escrow"
+          ]
+        },
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "token_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  111,
+                  107,
+                  101,
+                  110,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          },
+          "relations": [
+            "vault"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "commit_delivery",
+      "discriminator": [
+        6,
+        196,
+        49,
+        197,
+        177,
+        47,
+        24,
+        151
+      ],
+      "accounts": [
+        {
+          "name": "merchant",
+          "signer": true,
+          "relations": [
+            "escrow"
+          ]
+        },
+        {
+          "name": "escrow",
+          "writable": true
+        }
+      ],
+      "args": [
+        {
+          "name": "delivery_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "create_mandate",
+      "discriminator": [
+        230,
+        170,
+        158,
+        68,
+        33,
+        169,
+        16,
+        158
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "vault"
+          ]
+        },
+        {
+          "name": "vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mandate",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  97,
+                  110,
+                  100,
+                  97,
+                  116,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              },
+              {
+                "kind": "arg",
+                "path": "task_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "task_id",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "total_budget",
+          "type": "u64"
+        },
+        {
+          "name": "max_payment_amount",
+          "type": "u64"
+        },
+        {
+          "name": "max_purchases",
+          "type": "u32"
+        },
+        {
+          "name": "approval_threshold",
+          "type": "u64"
+        },
+        {
+          "name": "expires_at",
+          "type": "i64"
+        },
+        {
+          "name": "merchant_allowlist",
+          "type": {
+            "vec": "pubkey"
+          }
+        }
+      ]
+    },
+    {
+      "name": "create_vault",
+      "discriminator": [
+        29,
+        237,
+        247,
+        208,
+        193,
+        82,
+        54,
+        135
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "agent"
+        },
+        {
+          "name": "token_mint"
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  111,
+                  107,
+                  101,
+                  110,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "deposit",
+      "discriminator": [
+        242,
+        35,
+        198,
+        137,
+        82,
+        225,
+        242,
+        182
+      ],
+      "accounts": [
+        {
+          "name": "funder",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault"
+        },
+        {
+          "name": "token_mint",
+          "relations": [
+            "vault"
+          ]
+        },
+        {
+          "name": "token_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  111,
+                  107,
+                  101,
+                  110,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          },
+          "relations": [
+            "vault"
+          ]
+        },
+        {
+          "name": "funder_token_account",
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "pause_vault",
+      "discriminator": [
+        250,
+        6,
+        228,
+        57,
+        6,
+        104,
+        19,
+        210
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "vault"
+          ]
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "pay_exact",
+      "discriminator": [
+        195,
+        82,
+        38,
+        160,
+        95,
+        133,
+        190,
+        213
+      ],
+      "accounts": [
+        {
+          "name": "agent",
+          "signer": true,
+          "relations": [
+            "vault"
+          ]
+        },
+        {
+          "name": "vault",
+          "relations": [
+            "mandate"
+          ]
+        },
+        {
+          "name": "mandate",
+          "writable": true
+        },
+        {
+          "name": "token_mint",
+          "relations": [
+            "vault"
+          ]
+        },
+        {
+          "name": "token_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  111,
+                  107,
+                  101,
+                  110,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          },
+          "relations": [
+            "vault"
+          ]
+        },
+        {
+          "name": "merchant"
+        },
+        {
+          "name": "merchant_token_account",
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "refund_payment",
+      "discriminator": [
+        121,
+        205,
+        211,
+        181,
+        202,
+        147,
+        45,
+        248
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "relations": [
+            "mandate"
+          ]
+        },
+        {
+          "name": "mandate",
+          "writable": true,
+          "relations": [
+            "escrow"
+          ]
+        },
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "token_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  111,
+                  107,
+                  101,
+                  110,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          },
+          "relations": [
+            "vault"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "reject_request",
+      "discriminator": [
+        11,
+        232,
+        75,
+        149,
+        197,
+        137,
+        152,
+        208
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "vault"
+          ]
+        },
+        {
+          "name": "vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          },
+          "relations": [
+            "mandate"
+          ]
+        },
+        {
+          "name": "mandate",
+          "relations": [
+            "pending_approval"
+          ]
+        },
+        {
+          "name": "pending_approval",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  110,
+                  100,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mandate"
+              },
+              {
+                "kind": "account",
+                "path": "pending_approval.payment_id",
+                "account": "PendingApproval"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "release_payment",
+      "discriminator": [
+        24,
+        34,
+        191,
+        86,
+        145,
+        160,
+        183,
+        233
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "relations": [
+            "mandate"
+          ]
+        },
+        {
+          "name": "mandate",
+          "writable": true,
+          "relations": [
+            "escrow"
+          ]
+        },
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "token_mint",
+          "relations": [
+            "vault"
+          ]
+        },
+        {
+          "name": "token_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  111,
+                  107,
+                  101,
+                  110,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          },
+          "relations": [
+            "vault"
+          ]
+        },
+        {
+          "name": "merchant"
+        },
+        {
+          "name": "merchant_token_account",
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "delivered_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "request_approval",
+      "discriminator": [
+        14,
+        31,
+        134,
+        78,
+        89,
+        175,
+        45,
+        157
+      ],
+      "accounts": [
+        {
+          "name": "agent",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "vault"
+          ]
+        },
+        {
+          "name": "vault",
+          "relations": [
+            "mandate"
+          ]
+        },
+        {
+          "name": "mandate"
+        },
+        {
+          "name": "merchant"
+        },
+        {
+          "name": "pending_approval",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  110,
+                  100,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mandate"
+              },
+              {
+                "kind": "arg",
+                "path": "payment_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "payment_id",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "offer_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "expires_at",
+          "type": "i64"
+        }
+      ]
+    },
+    {
+      "name": "request_payment",
+      "discriminator": [
+        200,
+        214,
+        181,
+        94,
+        178,
+        84,
+        71,
+        247
+      ],
+      "accounts": [
+        {
+          "name": "agent",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "vault"
+          ]
+        },
+        {
+          "name": "vault",
+          "relations": [
+            "mandate"
+          ]
+        },
+        {
+          "name": "mandate",
+          "writable": true
+        },
+        {
+          "name": "merchant"
+        },
+        {
+          "name": "escrow",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mandate"
+              },
+              {
+                "kind": "arg",
+                "path": "payment_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "payment_id",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "offer_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "deadline",
+          "type": "i64"
+        }
+      ]
+    },
+    {
+      "name": "rotate_agent",
+      "discriminator": [
+        182,
+        91,
+        147,
+        107,
+        155,
+        47,
+        150,
+        176
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "vault"
+          ]
+        },
+        {
+          "name": "new_agent"
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "unpause_vault",
+      "discriminator": [
+        125,
+        29,
+        213,
+        213,
+        114,
+        155,
+        125,
+        63
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": [
+            "vault"
+          ]
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Escrow",
+      "discriminator": [
+        31,
+        213,
+        123,
+        187,
+        186,
+        22,
+        218,
+        155
+      ]
+    },
+    {
+      "name": "Mandate",
+      "discriminator": [
+        113,
+        216,
+        98,
+        159,
+        185,
+        63,
+        55,
+        18
+      ]
+    },
+    {
+      "name": "PendingApproval",
+      "discriminator": [
+        67,
+        115,
+        34,
+        204,
+        157,
+        43,
+        83,
+        27
+      ]
+    },
+    {
+      "name": "Vault",
+      "discriminator": [
+        211,
+        8,
+        232,
+        43,
+        2,
+        152,
+        117,
+        119
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "VaultPaused",
+      "msg": "Vault is paused by owner"
+    },
+    {
+      "code": 6001,
+      "name": "MandateExpired",
+      "msg": "Mandate has expired"
+    },
+    {
+      "code": 6002,
+      "name": "PaymentCapExceeded",
+      "msg": "Payment amount exceeds maximum payment cap"
+    },
+    {
+      "code": 6003,
+      "name": "BudgetExceeded",
+      "msg": "Payment amount exceeds available budget"
+    },
+    {
+      "code": 6004,
+      "name": "MaxPurchasesExceeded",
+      "msg": "Maximum purchase limit reached for this mandate"
+    },
+    {
+      "code": 6005,
+      "name": "MerchantNotAllowed",
+      "msg": "Merchant is not on the mandate allowlist"
+    },
+    {
+      "code": 6006,
+      "name": "RequiresApproval",
+      "msg": "Payment exceeds approval threshold and requires human authorization"
+    },
+    {
+      "code": 6007,
+      "name": "InvalidEscrowState",
+      "msg": "Escrow is in an invalid state for this operation"
+    },
+    {
+      "code": 6008,
+      "name": "DeliveryHashMismatch",
+      "msg": "Delivered hash does not match committed hash"
+    },
+    {
+      "code": 6009,
+      "name": "TimeoutNotReached",
+      "msg": "Timeout has not yet been reached"
+    },
+    {
+      "code": 6010,
+      "name": "DeadlinePassed",
+      "msg": "Escrow deadline has passed"
+    },
+    {
+      "code": 6011,
+      "name": "Unauthorized",
+      "msg": "Signer is not authorized for this operation"
+    },
+    {
+      "code": 6012,
+      "name": "ArithmeticOverflow",
+      "msg": "Arithmetic overflow in budget calculation"
+    }
+  ],
+  "types": [
+    {
+      "name": "Escrow",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "payment_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "mandate",
+            "type": "pubkey"
+          },
+          {
+            "name": "merchant",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "offer_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "delivery_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "deadline",
+            "type": "i64"
+          },
+          {
+            "name": "state",
+            "type": {
+              "defined": {
+                "name": "EscrowState"
+              }
+            }
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EscrowState",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Held"
+          },
+          {
+            "name": "Delivered"
+          },
+          {
+            "name": "Released"
+          },
+          {
+            "name": "Refunded"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Mandate",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "task_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "total_budget",
+            "type": "u64"
+          },
+          {
+            "name": "reserved_amount",
+            "type": "u64"
+          },
+          {
+            "name": "settled_amount",
+            "type": "u64"
+          },
+          {
+            "name": "max_payment_amount",
+            "type": "u64"
+          },
+          {
+            "name": "max_purchases",
+            "type": "u32"
+          },
+          {
+            "name": "purchase_count",
+            "type": "u32"
+          },
+          {
+            "name": "approval_threshold",
+            "type": "u64"
+          },
+          {
+            "name": "expires_at",
+            "type": "i64"
+          },
+          {
+            "name": "merchant_allowlist",
+            "type": {
+              "vec": "pubkey"
+            }
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PendingApproval",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "payment_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "mandate",
+            "type": "pubkey"
+          },
+          {
+            "name": "merchant",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "offer_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "requested_at",
+            "type": "i64"
+          },
+          {
+            "name": "expires_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Vault",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "agent",
+            "type": "pubkey"
+          },
+          {
+            "name": "token_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "token_vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "is_paused",
+            "type": "bool"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "vault_bump",
+            "type": "u8"
+          }
+        ]
+      }
+    }
+  ]
+}

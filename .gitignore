@@ -6,6 +6,8 @@ node_modules
 test-ledger
 .yarn
 .surfpool
+dist
+**/dist
 
 Plan_A.md
 Plan_B.md
