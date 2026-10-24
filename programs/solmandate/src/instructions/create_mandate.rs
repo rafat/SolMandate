@@ -1,5 +1,7 @@
 use anchor_lang::prelude::*;
-use crate::constants::{MANDATE_SEED, VAULT_SEED};
+use anchor_spl::token_interface::TokenAccount;
+use crate::constants::{MANDATE_SEED, TOKEN_VAULT_SEED, VAULT_SEED};
+use crate::error::SolMandateError;
 use crate::state::{Mandate, Vault};
 
 #[derive(Accounts)]
@@ -9,11 +11,21 @@ pub struct CreateMandate<'info> {
     pub owner: Signer<'info>,
 
     #[account(
+        mut,
         seeds = [VAULT_SEED, owner.key().as_ref()],
         bump = vault.bump,
         has_one = owner,
     )]
     pub vault: Account<'info, Vault>,
+
+    #[account(
+        seeds = [TOKEN_VAULT_SEED, vault.key().as_ref()],
+        bump = vault.vault_bump,
+        constraint = token_vault.key() == vault.token_vault @ SolMandateError::InvalidParameter,
+        constraint = token_vault.mint == vault.token_mint @ SolMandateError::InvalidParameter,
+        constraint = token_vault.owner == vault.key() @ SolMandateError::InvalidParameter,
+    )]
+    pub token_vault: InterfaceAccount<'info, TokenAccount>,
 
     #[account(
         init,
@@ -37,8 +49,42 @@ pub fn create_mandate_handler(
     expires_at: i64,
     merchant_allowlist: Vec<Pubkey>,
 ) -> Result<()> {
+    // 1. Input validations
+    require!(total_budget > 0, SolMandateError::InvalidAmount);
+    require!(
+        max_payment_amount > 0 && max_payment_amount <= total_budget,
+        SolMandateError::InvalidAmount
+    );
+    require!(max_purchases > 0, SolMandateError::InvalidParameter);
+    let clock = Clock::get()?;
+    require!(expires_at > clock.unix_timestamp, SolMandateError::MandateExpired);
+    require!(merchant_allowlist.len() <= 16, SolMandateError::AllowlistExceeded);
+
+    // Reject duplicate entries in allowlist
+    let mut deduplicated = merchant_allowlist.clone();
+    deduplicated.sort();
+    deduplicated.dedup();
+    require!(deduplicated.len() == merchant_allowlist.len(), SolMandateError::InvalidParameter);
+
+    // 2. Vault liability accounting check
+    let vault = &mut ctx.accounts.vault;
+    let token_vault_balance = ctx.accounts.token_vault.amount;
+    let required_vault_balance = vault
+        .allocated_budget
+        .checked_add(total_budget)
+        .ok_or(SolMandateError::ArithmeticOverflow)?;
+
+    require!(
+        token_vault_balance >= required_vault_balance,
+        SolMandateError::VaultOvercommitted
+    );
+
+    // 3. Update vault allocated liabilities
+    vault.allocated_budget = required_vault_balance;
+
+    // 4. Initialize mandate
     let mandate = &mut ctx.accounts.mandate;
-    mandate.vault = ctx.accounts.vault.key();
+    mandate.vault = vault.key();
     mandate.task_id = task_id;
     mandate.total_budget = total_budget;
     mandate.reserved_amount = 0;

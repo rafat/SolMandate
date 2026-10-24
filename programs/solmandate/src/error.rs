@@ -28,4 +28,16 @@ pub enum SolMandateError {
     Unauthorized,
     #[msg("Arithmetic overflow in budget calculation")]
     ArithmeticOverflow,
+    #[msg("Vault does not have enough unallocated funds for this mandate budget")]
+    VaultOvercommitted,
+    #[msg("Merchant must commit a non-zero delivery hash on-chain before release")]
+    MissingDeliveryCommitment,
+    #[msg("Payment amount must be greater than zero")]
+    InvalidAmount,
+    #[msg("Parameter value is invalid")]
+    InvalidParameter,
+    #[msg("Merchant allowlist exceeds maximum allowed entries")]
+    AllowlistExceeded,
+    #[msg("Deadline must be in the future")]
+    InvalidDeadline,
 }

@@ -151,6 +151,7 @@ describe("SolMandate On-Chain Protocol Tests", () => {
       .accounts({
         owner: owner.publicKey,
         vault: vaultPda,
+        tokenVault: tokenVaultPda,
         mandate: mandatePda,
         systemProgram: SystemProgram.programId,
       })
@@ -336,17 +337,17 @@ describe("SolMandate On-Chain Protocol Tests", () => {
     let mandate = await program.account.mandate.fetch(mandatePda);
     expect(mandate.reservedAmount.toNumber()).to.equal(300_000);
 
-    // Delivery failed -> refund
+    // Delivery failed -> merchant triggers voluntary refund
     await program.methods
       .refundPayment()
       .accounts({
-        authority: agent.publicKey,
+        authority: merchant.publicKey,
         vault: vaultPda,
         mandate: mandatePda,
         escrow: escrowPda,
         tokenVault: tokenVaultPda,
       })
-      .signers([agent])
+      .signers([merchant])
       .rpc();
 
     mandate = await program.account.mandate.fetch(mandatePda);

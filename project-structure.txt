@@ -1,0 +1,67 @@
+.
+├── Anchor.toml
+├── app
+├── Cargo.lock
+├── Cargo.toml
+├── migrations
+│   └── deploy.ts
+├── package.json
+├── packages
+│   ├── sdk
+│   │   ├── package.json
+│   │   ├── src
+│   │   │   ├── client.ts
+│   │   │   ├── fetch.ts
+│   │   │   ├── idl
+│   │   │   │   └── solmandate.json
+│   │   │   ├── index.ts
+│   │   │   ├── pda.ts
+│   │   │   ├── schemes
+│   │   │   │   ├── escrow.ts
+│   │   │   │   └── exact.ts
+│   │   │   └── types.ts
+│   │   └── tsconfig.json
+│   └── verifier
+│       ├── package.json
+│       ├── src
+│       │   └── index.ts
+│       └── tsconfig.json
+├── Plan_A.md
+├── Plan_B.md
+├── pnpm-lock.yaml
+├── pnpm-workspace.yaml
+├── programs
+│   └── solmandate
+│       ├── Cargo.toml
+│       └── src
+│           ├── constants.rs
+│           ├── error.rs
+│           ├── instructions
+│           │   ├── approval.rs
+│           │   ├── create_mandate.rs
+│           │   ├── create_vault.rs
+│           │   ├── deposit.rs
+│           │   ├── escrow_settlement.rs
+│           │   ├── manage_vault.rs
+│           │   ├── pay_exact.rs
+│           │   └── request_payment.rs
+│           ├── instructions.rs
+│           ├── lib.rs
+│           └── state.rs
+├── project-structure.txt
+├── rust-toolchain.toml
+├── services
+│   ├── facilitator
+│   │   └── src
+│   └── merchant-api
+│       ├── package.json
+│       ├── src
+│       │   └── index.ts
+│       └── tsconfig.json
+├── tests
+│   ├── e2e_fetch.ts
+│   └── solmandate.ts
+├── tsconfig.json
+└── Unified_Plan.md
+
+20 directories, 45 files

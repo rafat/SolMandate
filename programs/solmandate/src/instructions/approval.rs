@@ -70,12 +70,35 @@ pub struct RejectRequest<'info> {
 }
 
 pub fn approve_request_handler(ctx: Context<ApproveRequest>, deadline: i64) -> Result<()> {
+    let vault = &ctx.accounts.vault;
     let mandate = &mut ctx.accounts.mandate;
     let pending = &ctx.accounts.pending_approval;
     let clock = Clock::get()?;
 
+    // 1. Vault pause check
+    require!(!vault.is_paused, SolMandateError::VaultPaused);
+
+    // 2. Pending request expiration check
     require!(clock.unix_timestamp <= pending.expires_at, SolMandateError::DeadlinePassed);
 
+    // 3. Mandate expiration check
+    require!(clock.unix_timestamp <= mandate.expires_at, SolMandateError::MandateExpired);
+
+    // 4. Max purchase count check
+    require!(mandate.purchase_count < mandate.max_purchases, SolMandateError::MaxPurchasesExceeded);
+
+    // 5. Merchant eligibility check
+    require!(mandate.is_merchant_allowed(&pending.merchant), SolMandateError::MerchantNotAllowed);
+
+    // 6. Deadline validity
+    require!(deadline > clock.unix_timestamp, SolMandateError::InvalidDeadline);
+    require!(deadline <= mandate.expires_at, SolMandateError::InvalidDeadline);
+
+    // 7. Amount and payment cap validation (independent invariant re-check at approval time)
+    require!(pending.amount > 0, SolMandateError::InvalidAmount);
+    require!(pending.amount <= mandate.max_payment_amount, SolMandateError::PaymentCapExceeded);
+
+    // 8. Budget check
     let available = mandate.available_budget().ok_or(SolMandateError::ArithmeticOverflow)?;
     require!(pending.amount <= available, SolMandateError::BudgetExceeded);
 

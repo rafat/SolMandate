@@ -73,9 +73,12 @@ pub fn request_payment_handler(
     offer_hash: [u8; 32],
     deadline: i64,
 ) -> Result<()> {
+    require!(amount > 0, SolMandateError::InvalidAmount);
     let vault = &ctx.accounts.vault;
     let mandate = &mut ctx.accounts.mandate;
     let clock = Clock::get()?;
+    require!(deadline > clock.unix_timestamp, SolMandateError::InvalidDeadline);
+    require!(deadline <= mandate.expires_at, SolMandateError::InvalidDeadline);
 
     // 1. Vault pause check
     require!(!vault.is_paused, SolMandateError::VaultPaused);
@@ -127,13 +130,17 @@ pub fn request_approval_handler(
     offer_hash: [u8; 32],
     expires_at: i64,
 ) -> Result<()> {
+    require!(amount > 0, SolMandateError::InvalidAmount);
     let vault = &ctx.accounts.vault;
     let mandate = &ctx.accounts.mandate;
     let clock = Clock::get()?;
+    require!(expires_at > clock.unix_timestamp, SolMandateError::InvalidDeadline);
+    require!(expires_at <= mandate.expires_at, SolMandateError::InvalidDeadline);
 
     require!(!vault.is_paused, SolMandateError::VaultPaused);
     require!(clock.unix_timestamp <= mandate.expires_at, SolMandateError::MandateExpired);
     require!(mandate.purchase_count < mandate.max_purchases, SolMandateError::MaxPurchasesExceeded);
+    require!(amount <= mandate.max_payment_amount, SolMandateError::PaymentCapExceeded);
     require!(mandate.is_merchant_allowed(&ctx.accounts.merchant.key()), SolMandateError::MerchantNotAllowed);
 
     let available = mandate.available_budget().ok_or(SolMandateError::ArithmeticOverflow)?;

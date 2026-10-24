@@ -21,6 +21,7 @@ import {
   EscrowAccountData,
   MandateAccountData,
   PayExactParams,
+  PendingApprovalAccountData,
   RefundPaymentParams,
   RejectRequestParams,
   ReleasePaymentParams,
@@ -163,6 +164,7 @@ export class SolMandateClient {
   // --- Mandate Instructions ---
   public async createMandate(params: CreateMandateParams): Promise<{ signature: TransactionSignature; mandatePda: PublicKey }> {
     const [vaultPda] = this.getVaultPda();
+    const [tokenVaultPda] = this.getTokenVaultPda(vaultPda);
     const [mandatePda] = this.getMandatePda(vaultPda, params.taskId);
 
     const taskIdBytes = Array.from(to32ByteArray(params.taskId));
@@ -184,6 +186,7 @@ export class SolMandateClient {
       .accounts({
         owner: this.signer.publicKey,
         vault: vaultPda,
+        tokenVault: tokenVaultPda,
         mandate: mandatePda,
         systemProgram: SystemProgram.programId,
       })
@@ -321,13 +324,18 @@ export class SolMandateClient {
   }
 
   public async releasePayment(params: ReleasePaymentParams): Promise<TransactionSignature> {
+    if (!params.deliveredHash) {
+      throw new Error("deliveredHash is required to release payment");
+    }
+    const deliveredHashBytes = Array.from(to32ByteArray(params.deliveredHash));
+    const isAllZeros = deliveredHashBytes.every((b) => b === 0);
+    if (isAllZeros) {
+      throw new Error("deliveredHash cannot be an all-zero byte array");
+    }
+
     const mandate = await this.fetchMandate(params.mandatePda);
     const vault = await this.fetchVault(mandate.vault);
     const [tokenVaultPda] = this.getTokenVaultPda(mandate.vault);
-
-    const deliveredHashBytes = params.deliveredHash
-      ? Array.from(to32ByteArray(params.deliveredHash))
-      : new Array(32).fill(0);
 
     return await this.program.methods
       .releasePayment(deliveredHashBytes)
@@ -393,7 +401,7 @@ export class SolMandateClient {
     return (await (this.program.account as any).escrow.fetch(escrowPda)) as unknown as EscrowAccountData;
   }
 
-  public async fetchPendingApproval(pendingApprovalPda: PublicKey): Promise<any> {
-    return await (this.program.account as any).pendingApproval.fetch(pendingApprovalPda);
+  public async fetchPendingApproval(pendingApprovalPda: PublicKey): Promise<PendingApprovalAccountData> {
+    return (await (this.program.account as any).pendingApproval.fetch(pendingApprovalPda)) as unknown as PendingApprovalAccountData;
   }
 }

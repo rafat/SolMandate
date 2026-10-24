@@ -9,6 +9,7 @@ pub struct PayExact<'info> {
     pub agent: Signer<'info>,
 
     #[account(
+        mut,
         has_one = agent,
         has_one = token_mint,
         has_one = token_vault,
@@ -44,6 +45,7 @@ pub struct PayExact<'info> {
 }
 
 pub fn pay_exact_handler(ctx: Context<PayExact>, amount: u64) -> Result<()> {
+    require!(amount > 0, SolMandateError::InvalidAmount);
     let vault = &ctx.accounts.vault;
     let mandate = &mut ctx.accounts.mandate;
     let clock = Clock::get()?;
@@ -75,6 +77,9 @@ pub fn pay_exact_handler(ctx: Context<PayExact>, amount: u64) -> Result<()> {
     // Update state
     mandate.settled_amount = mandate.settled_amount.checked_add(amount).ok_or(SolMandateError::ArithmeticOverflow)?;
     mandate.purchase_count = mandate.purchase_count.checked_add(1).ok_or(SolMandateError::ArithmeticOverflow)?;
+
+    let vault = &mut ctx.accounts.vault;
+    vault.allocated_budget = vault.allocated_budget.checked_sub(amount).ok_or(SolMandateError::ArithmeticOverflow)?;
 
     // CPI transfer from vault to merchant
     let owner_key = vault.owner;

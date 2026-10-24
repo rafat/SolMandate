@@ -43,6 +43,7 @@ pub fn create_vault_handler(ctx: Context<CreateVault>) -> Result<()> {
     vault.token_mint = ctx.accounts.token_mint.key();
     vault.token_vault = ctx.accounts.token_vault.key();
     vault.is_paused = false;
+    vault.allocated_budget = 0;
     vault.bump = ctx.bumps.vault;
     vault.vault_bump = ctx.bumps.token_vault;
     Ok(())

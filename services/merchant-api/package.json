@@ -9,6 +9,8 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.13.8",
+    "@solana/spl-token": "^0.4.15",
+    "@solana/web3.js": "^1.99.0",
     "@solmandate/verifier": "workspace:*",
     "@x402/core": "^2.28.0",
     "hono": "^4.7.0"

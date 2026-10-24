@@ -20,6 +20,7 @@ pub struct ReleasePayment<'info> {
     pub authority: Signer<'info>,
 
     #[account(
+        mut,
         has_one = token_mint,
         has_one = token_vault,
     )]
@@ -92,8 +93,13 @@ pub struct RefundPayment<'info> {
 }
 
 pub fn commit_delivery_handler(ctx: Context<CommitDelivery>, delivery_hash: [u8; 32]) -> Result<()> {
+    require!(delivery_hash != [0u8; 32], SolMandateError::MissingDeliveryCommitment);
+
     let escrow = &mut ctx.accounts.escrow;
     require!(escrow.state == EscrowState::Held, SolMandateError::InvalidEscrowState);
+
+    let clock = Clock::get()?;
+    require!(clock.unix_timestamp <= escrow.deadline, SolMandateError::DeadlinePassed);
 
     escrow.delivery_hash = delivery_hash;
     escrow.state = EscrowState::Delivered;
@@ -107,18 +113,24 @@ pub fn release_payment_handler(ctx: Context<ReleasePayment>, delivered_hash: [u8
 
     let escrow = &mut ctx.accounts.escrow;
     require!(
-        escrow.state == EscrowState::Held || escrow.state == EscrowState::Delivered,
+        escrow.state == EscrowState::Delivered,
         SolMandateError::InvalidEscrowState
     );
-
-    // If merchant committed a delivery hash, verify the delivered hash matches
-    if escrow.delivery_hash != [0u8; 32] {
-        require!(delivered_hash == escrow.delivery_hash, SolMandateError::DeliveryHashMismatch);
-    }
+    require!(
+        escrow.delivery_hash != [0u8; 32],
+        SolMandateError::MissingDeliveryCommitment
+    );
+    require!(
+        delivered_hash == escrow.delivery_hash,
+        SolMandateError::DeliveryHashMismatch
+    );
 
     let mandate = &mut ctx.accounts.mandate;
     mandate.reserved_amount = mandate.reserved_amount.checked_sub(escrow.amount).ok_or(SolMandateError::ArithmeticOverflow)?;
     mandate.settled_amount = mandate.settled_amount.checked_add(escrow.amount).ok_or(SolMandateError::ArithmeticOverflow)?;
+
+    let vault = &mut ctx.accounts.vault;
+    vault.allocated_budget = vault.allocated_budget.checked_sub(escrow.amount).ok_or(SolMandateError::ArithmeticOverflow)?;
 
     escrow.state = EscrowState::Released;
 
@@ -148,9 +160,9 @@ pub fn refund_payment_handler(ctx: Context<RefundPayment>) -> Result<()> {
     let vault = &ctx.accounts.vault;
     let escrow = &mut ctx.accounts.escrow;
 
-    // Agent, owner, or merchant can trigger refund
+    // Refund requires authorization from merchant or owner
     require!(
-        authority == vault.agent || authority == vault.owner || authority == escrow.merchant,
+        authority == escrow.merchant || authority == vault.owner,
         SolMandateError::Unauthorized
     );
     require!(
@@ -174,7 +186,7 @@ pub fn claim_after_timeout_handler(ctx: Context<RefundPayment>) -> Result<()> {
 
     require!(authority == vault.agent || authority == vault.owner, SolMandateError::Unauthorized);
     require!(
-        escrow.state == EscrowState::Held || escrow.state == EscrowState::Delivered,
+        escrow.state == EscrowState::Held,
         SolMandateError::InvalidEscrowState
     );
     require!(clock.unix_timestamp > escrow.deadline, SolMandateError::TimeoutNotReached);

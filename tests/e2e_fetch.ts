@@ -12,8 +12,12 @@ import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { expect } from "chai";
 import crypto from "crypto";
 import { SolMandateClient } from "../packages/sdk/src/client";
-import { createMandateFetch } from "../packages/sdk/src/fetch";
+import {
+  createMandateFetch,
+  DeliveryVerificationError,
+} from "../packages/sdk/src/fetch";
 import { createMerchantApp } from "../services/merchant-api/src/index";
+import { createFacilitatorApp } from "../services/facilitator/src/index";
 
 describe("SolMandate E2E: x402 Client + Merchant + On-Chain Program", () => {
   const provider = anchor.AnchorProvider.env();
@@ -36,8 +40,8 @@ describe("SolMandate E2E: x402 Client + Merchant + On-Chain Program", () => {
   const taskId = Array.from(
     crypto.createHash("sha256").update("e2e-agent-task-001").digest()
   );
-  const totalBudget = new anchor.BN(10_000_000); // 10 USDC
-  const maxPayment = new anchor.BN(3_000_000); // 3 USDC cap
+  const totalBudget = new anchor.BN(15_000_000); // 15 USDC
+  const maxPayment = new anchor.BN(5_000_000); // 5 USDC cap
   const maxPurchases = 20;
   const approvalThreshold = new anchor.BN(5_000_000);
   const expiresAt = new anchor.BN(Math.floor(Date.now() / 1000) + 86400);
@@ -45,6 +49,7 @@ describe("SolMandate E2E: x402 Client + Merchant + On-Chain Program", () => {
   let sdkClient: SolMandateClient;
   let merchantApp: ReturnType<typeof createMerchantApp>;
   let mandateFetch: ReturnType<typeof createMandateFetch>;
+  let honoFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
   before(async () => {
     // 1. Airdrop SOL
@@ -148,6 +153,7 @@ describe("SolMandate E2E: x402 Client + Merchant + On-Chain Program", () => {
       .accounts({
         owner: owner.publicKey,
         vault: vaultPda,
+        tokenVault: tokenVaultPda,
         mandate: mandatePda,
         systemProgram: SystemProgram.programId,
       })
@@ -161,17 +167,44 @@ describe("SolMandate E2E: x402 Client + Merchant + On-Chain Program", () => {
       programId: program.programId,
     });
 
-    // 9. Setup Merchant App
+    // Setup Merchant SDK Client (merchant signer)
+    const merchantClient = new SolMandateClient({
+      connection: provider.connection,
+      signer: merchant,
+      programId: program.programId,
+    });
+
+    // 9. Setup Merchant App with connection, on-chain delivery commitment & refund handlers
     merchantApp = createMerchantApp({
       merchantPubkey: merchant.publicKey.toBase58(),
       tokenMint: tokenMint.toBase58(),
       network: "solana:localnet",
+      connection: provider.connection,
+      onCommitDelivery: async (escrowPdaStr: string, deliveryHashHex: string) => {
+        const escrowPda = new PublicKey(escrowPdaStr);
+        await merchantClient.commitDelivery({
+          escrowPda,
+          deliveryHash: deliveryHashHex,
+        });
+      },
+      onRefundPayment: async (escrowPdaStr: string) => {
+        const escrowPda = new PublicKey(escrowPdaStr);
+        await merchantClient.refundPayment({
+          mandatePda,
+          escrowPda,
+        });
+      },
     });
 
     // Custom fetch calling the Hono merchant app directly
-    const honoFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-      const urlStr = typeof input === "string" ? input : input.toString();
-      const req = new Request(urlStr, init);
+    honoFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      let req: Request;
+      if (input instanceof Request) {
+        req = input;
+      } else {
+        const urlStr = typeof input === "string" ? input : input.toString();
+        req = new Request(urlStr, init);
+      }
       return await merchantApp.fetch(req);
     };
 
@@ -184,7 +217,32 @@ describe("SolMandate E2E: x402 Client + Merchant + On-Chain Program", () => {
     });
   });
 
-  it("1. Mode 1 (Exact): Auto-pays x402 402 response and retrieves telemetry", async () => {
+  it("1. Mode 1 (Exact): Auto-pays x402 402 response, verifies transaction on-chain, and retrieves telemetry", async () => {
+    // 1a. Attempting to pass a fabricated signature directly to merchant API must fail with HTTP 402
+    const fakePayload = {
+      x402Version: 2,
+      accepted: {
+        scheme: "exact",
+        network: "solana:localnet",
+        asset: tokenMint.toBase58(),
+        amount: "1000000",
+        payTo: merchant.publicKey.toBase58(),
+      },
+      payload: {
+        signature: "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUc",
+      },
+    };
+    const fakeReq = new Request("http://localhost:4020/api/data/exact", {
+      headers: {
+        "payment-signature": Buffer.from(JSON.stringify(fakePayload)).toString("base64"),
+      },
+    });
+    const fakeRes = await merchantApp.fetch(fakeReq);
+    expect(fakeRes.status).to.equal(402);
+    const fakeBody = await fakeRes.json();
+    expect(fakeBody.error).to.match(/Transaction not found|verification failed/i);
+
+    // 1b. Legitimate flow via mandateFetch succeeds
     const merchantAccountBefore = await getAccount(
       provider.connection,
       merchantTokenAccount
@@ -253,5 +311,316 @@ describe("SolMandate E2E: x402 Client + Merchant + On-Chain Program", () => {
     const mandateAfter = await program.account.mandate.fetch(mandatePda);
     expect(mandateAfter.settledAmount.toNumber()).to.equal(settledBefore);
     expect(mandateAfter.reservedAmount.toNumber()).to.equal(reservedBefore); // Restored!
+  });
+
+  it("4. Fails closed on unsupported scheme (returns 402, no on-chain payment)", async () => {
+    const mandateBefore = await program.account.mandate.fetch(mandatePda);
+    const settledBefore = mandateBefore.settledAmount.toNumber();
+
+    const res = await mandateFetch("http://localhost:4020/api/data/unsupported");
+    expect(res.status).to.equal(402);
+
+    // Verify no funds settled
+    const mandateAfter = await program.account.mandate.fetch(mandatePda);
+    expect(mandateAfter.settledAmount.toNumber()).to.equal(settledBefore);
+  });
+
+  it("5. Custom request headers, Request instance, and POST bodies are preserved across 402 retry", async () => {
+    // 5a. Custom header on GET
+    const traceId = "agent-trace-req-999";
+    const res = await mandateFetch("http://localhost:4020/api/data/exact", {
+      headers: {
+        "x-agent-trace": traceId,
+      },
+    });
+    expect(res.status).to.equal(200);
+    const body = await res.json();
+    expect(body.success).to.be.true;
+    expect(body.agentTrace).to.equal(traceId);
+
+    // 5b. Request instance input
+    const reqInstance = new Request("http://localhost:4020/api/data/exact", {
+      headers: {
+        "x-agent-trace": "request-instance-trace-888",
+      },
+    });
+    const resFromReq = await mandateFetch(reqInstance);
+    expect(resFromReq.status).to.equal(200);
+    const bodyFromReq = await resFromReq.json();
+    expect(bodyFromReq.agentTrace).to.equal("request-instance-trace-888");
+
+    // 5c. POST body and custom headers preservation across 402 challenge
+    const postPayload = JSON.stringify({ query: "compute_clusters", tier: "pro" });
+    const postRes = await mandateFetch("http://localhost:4020/api/data/post-echo", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-custom-post-header": "echo-test-header-123",
+      },
+      body: postPayload,
+    });
+    expect(postRes.status).to.equal(200);
+    const postJson = await postRes.json();
+    expect(postJson.success).to.be.true;
+    expect(postJson.echoedBody).to.equal(postPayload);
+    expect(postJson.echoedHeader).to.equal("echo-test-header-123");
+  });
+
+  it("6. Delivery hash mismatch aborts payment release, throws DeliveryVerificationError, and protects funds", async () => {
+    let verificationStatus: string = "";
+    let verificationError: string = "";
+
+    const trackedFetch = createMandateFetch({
+      client: sdkClient,
+      mandatePda,
+      tokenMint,
+      fetch: honoFetch as any,
+      onDeliveryVerified: (evt) => {
+        verificationStatus = evt.status;
+        verificationError = evt.error || "";
+      },
+    });
+
+    const mandateBefore = await program.account.mandate.fetch(mandatePda);
+    const settledBefore = mandateBefore.settledAmount.toNumber();
+
+    try {
+      await trackedFetch(
+        "http://localhost:4020/api/data/escrow?simulate=corrupt_data"
+      );
+      expect.fail("Should have thrown DeliveryVerificationError");
+    } catch (err: any) {
+      expect(err).to.be.instanceOf(DeliveryVerificationError);
+      expect(err.message).to.include("Hash mismatch");
+      expect(err.actualHash).to.be.a("string");
+      expect(err.committedHash).to.be.a("string");
+    }
+
+    // Verification failed event emitted due to hash mismatch
+    expect(verificationStatus).to.equal("verification_failed");
+    expect(verificationError).to.include("Hash mismatch");
+
+    // Crucial on-chain check: payment was NOT released! Settled amount did not increase!
+    const mandateAfter = await program.account.mandate.fetch(mandatePda);
+    expect(mandateAfter.settledAmount.toNumber()).to.equal(settledBefore);
+  });
+
+  it("7. Client strictly rejects invalid requirements (network, cap) without submitting transaction", async () => {
+    const strictFetch = createMandateFetch({
+      client: sdkClient,
+      mandatePda,
+      tokenMint,
+      allowedNetworks: ["solana:mainnet-beta"], // localnet is not allowed
+      fetch: honoFetch as any,
+    });
+
+    try {
+      await strictFetch("http://localhost:4020/api/data/exact");
+      expect.fail("Should have rejected disallowed network");
+    } catch (err: any) {
+      expect(err.message).to.include("Network 'solana:localnet' is not permitted");
+    }
+
+    const cappedFetch = createMandateFetch({
+      client: sdkClient,
+      mandatePda,
+      tokenMint,
+      maxPaymentAmount: 500_000n, // less than 1_000_000 required
+      fetch: honoFetch as any,
+    });
+
+    try {
+      await cappedFetch("http://localhost:4020/api/data/exact");
+      expect.fail("Should have rejected exceeding cap");
+    } catch (err: any) {
+      expect(err.message).to.include("exceeds client configured max payment amount");
+    }
+  });
+
+  it("8. Merchant rejects escrow with mismatched offer hash before committing delivery", async () => {
+    const bogusOfferHash = Array.from(crypto.createHash("sha256").update("bogus-offer").digest());
+    const paymentId = Array.from(crypto.createHash("sha256").update("test-bogus-escrow").digest());
+    const amount = new anchor.BN(2_000_000);
+    const deadline = new anchor.BN(Math.floor(Date.now() / 1000) + 3600);
+
+    const [bogusEscrowPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("escrow"), mandatePda.toBuffer(), Buffer.from(paymentId)],
+      program.programId
+    );
+
+    await program.methods
+      .requestPayment(paymentId, amount, bogusOfferHash, deadline)
+      .accounts({
+        agent: agent.publicKey,
+        vault: vaultPda,
+        mandate: mandatePda,
+        merchant: merchant.publicKey,
+        escrow: bogusEscrowPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([agent])
+      .rpc();
+
+    // Present this escrow to merchant escrow endpoint
+    const bogusPayload = {
+      x402Version: 2,
+      accepted: {
+        scheme: "escrow",
+        network: "solana:localnet",
+        asset: tokenMint.toBase58(),
+        amount: "2000000",
+        payTo: merchant.publicKey.toBase58(),
+      },
+      payload: {
+        escrowPda: bogusEscrowPda.toBase58(),
+      },
+    };
+
+    const bogusReq = new Request("http://localhost:4020/api/data/escrow", {
+      headers: {
+        "payment-signature": Buffer.from(JSON.stringify(bogusPayload)).toString("base64"),
+      },
+    });
+
+    const bogusRes = await merchantApp.fetch(bogusReq);
+    expect(bogusRes.status).to.equal(400);
+    const body = await bogusRes.json();
+    expect(body.error).to.include("Escrow offer hash mismatch");
+  });
+
+  it("9. Facilitator service verifies exact on-chain payments and rejects unconfirmed/invalid transactions", async () => {
+    const facilitatorApp = createFacilitatorApp({
+      connection: provider.connection,
+    });
+
+    // 9a. Verify health check
+    const healthRes = await facilitatorApp.fetch(new Request("http://localhost:4021/health"));
+    expect(healthRes.status).to.equal(200);
+    const healthBody = await healthRes.json();
+    expect(healthBody.service).to.equal("SolMandate Facilitator");
+    expect(healthBody.supportedSchemes).to.deep.equal(["exact", "escrow"]);
+
+    // 9b. Rejection of unconfirmed or fabricated signature
+    const invalidVerifyReq = new Request("http://localhost:4021/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheme: "exact",
+        payment: { signature: "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUc" },
+        requirements: {
+          amount: "1000000",
+          asset: tokenMint.toBase58(),
+          payTo: merchant.publicKey.toBase58(),
+        },
+      }),
+    });
+    const invalidVerifyRes = await facilitatorApp.fetch(invalidVerifyReq);
+    expect(invalidVerifyRes.status).to.equal(400);
+    const invalidBody = await invalidVerifyRes.json();
+    expect(invalidBody.valid).to.be.false;
+    expect(invalidBody.error).to.include("Transaction not found");
+
+    // 9c. Legitimate exact payment execution & facilitator verification
+    const exactPaymentId = Array.from(crypto.createHash("sha256").update("facilitator-exact-test").digest());
+    const validTxSig = await sdkClient.payExact({
+      mandatePda,
+      merchant: merchant.publicKey,
+      merchantTokenAccount,
+      amount: 1_000_000n,
+      paymentId: exactPaymentId,
+    });
+
+    await provider.connection.confirmTransaction(validTxSig, "confirmed");
+
+    const validVerifyReq = new Request("http://localhost:4021/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheme: "exact",
+        payment: { signature: validTxSig },
+        requirements: {
+          amount: "1000000",
+          asset: tokenMint.toBase58(),
+          payTo: merchant.publicKey.toBase58(),
+        },
+      }),
+    });
+    const validVerifyRes = await facilitatorApp.fetch(validVerifyReq);
+    expect(validVerifyRes.status).to.equal(200);
+    const validBody = await validVerifyRes.json();
+    expect(validBody.valid).to.be.true;
+    expect(validBody.txDetails.merchant).to.equal(merchant.publicKey.toBase58());
+  });
+
+  it("10. Facilitator service verifies on-chain escrow account invariants", async () => {
+    const facilitatorApp = createFacilitatorApp({
+      connection: provider.connection,
+    });
+
+    const paymentId = Array.from(crypto.createHash("sha256").update("facilitator-escrow-test").digest());
+    const offerHashHex = "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff";
+    const offerHash = Array.from(Buffer.from(offerHashHex, "hex"));
+    const amount = new anchor.BN(1_500_000);
+    const deadline = new anchor.BN(Math.floor(Date.now() / 1000) + 3600);
+
+    const [escrowPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("escrow"), mandatePda.toBuffer(), Buffer.from(paymentId)],
+      program.programId
+    );
+
+    await program.methods
+      .requestPayment(paymentId, amount, offerHash, deadline)
+      .accounts({
+        agent: agent.publicKey,
+        vault: vaultPda,
+        mandate: mandatePda,
+        merchant: merchant.publicKey,
+        escrow: escrowPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([agent])
+      .rpc();
+
+    // Verify valid escrow via facilitator
+    const validEscrowReq = new Request("http://localhost:4021/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheme: "escrow",
+        payment: { escrowPda: escrowPda.toBase58() },
+        requirements: {
+          amount: "1500000",
+          asset: tokenMint.toBase58(),
+          payTo: merchant.publicKey.toBase58(),
+          extra: { offerHash: offerHashHex },
+        },
+      }),
+    });
+    const validRes = await facilitatorApp.fetch(validEscrowReq);
+    expect(validRes.status).to.equal(200);
+    const validBody = await validRes.json();
+    expect(validBody.valid).to.be.true;
+    expect(validBody.escrow.state).to.equal("Held");
+
+    // Verify rejection when expected offer hash does not match
+    const mismatchReq = new Request("http://localhost:4021/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheme: "escrow",
+        payment: { escrowPda: escrowPda.toBase58() },
+        requirements: {
+          amount: "1500000",
+          asset: tokenMint.toBase58(),
+          payTo: merchant.publicKey.toBase58(),
+          extra: { offerHash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" },
+        },
+      }),
+    });
+    const mismatchRes = await facilitatorApp.fetch(mismatchReq);
+    expect(mismatchRes.status).to.equal(400);
+    const mismatchBody = await mismatchRes.json();
+    expect(mismatchBody.valid).to.be.false;
+    expect(mismatchBody.error).to.include("Escrow offer hash mismatch");
   });
 });

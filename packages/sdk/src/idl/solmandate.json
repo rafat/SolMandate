@@ -256,6 +256,7 @@
         },
         {
           "name": "vault",
+          "writable": true,
           "pda": {
             "seeds": [
               {
@@ -271,6 +272,33 @@
               {
                 "kind": "account",
                 "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  111,
+                  107,
+                  101,
+                  110,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
               }
             ]
           }
@@ -570,6 +598,7 @@
         },
         {
           "name": "vault",
+          "writable": true,
           "relations": [
             "mandate"
           ]
@@ -803,6 +832,7 @@
         },
         {
           "name": "vault",
+          "writable": true,
           "relations": [
             "mandate"
           ]
@@ -1281,6 +1311,36 @@
       "code": 6012,
       "name": "ArithmeticOverflow",
       "msg": "Arithmetic overflow in budget calculation"
+    },
+    {
+      "code": 6013,
+      "name": "VaultOvercommitted",
+      "msg": "Vault does not have enough unallocated funds for this mandate budget"
+    },
+    {
+      "code": 6014,
+      "name": "MissingDeliveryCommitment",
+      "msg": "Merchant must commit a non-zero delivery hash on-chain before release"
+    },
+    {
+      "code": 6015,
+      "name": "InvalidAmount",
+      "msg": "Payment amount must be greater than zero"
+    },
+    {
+      "code": 6016,
+      "name": "InvalidParameter",
+      "msg": "Parameter value is invalid"
+    },
+    {
+      "code": 6017,
+      "name": "AllowlistExceeded",
+      "msg": "Merchant allowlist exceeds maximum allowed entries"
+    },
+    {
+      "code": 6018,
+      "name": "InvalidDeadline",
+      "msg": "Deadline must be in the future"
     }
   ],
   "types": [
@@ -1504,6 +1564,10 @@
           {
             "name": "is_paused",
             "type": "bool"
+          },
+          {
+            "name": "allocated_budget",
+            "type": "u64"
           },
           {
             "name": "bump",

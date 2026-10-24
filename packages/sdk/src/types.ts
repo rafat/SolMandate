@@ -67,7 +67,7 @@ export interface ReleasePaymentParams {
   escrowPda: PublicKey;
   merchant: PublicKey;
   merchantTokenAccount: PublicKey;
-  deliveredHash?: Uint8Array | number[] | string;
+  deliveredHash: Uint8Array | number[] | string;
 }
 
 export interface RefundPaymentParams {
@@ -94,6 +94,17 @@ export interface EscrowAccountData {
   bump: number;
 }
 
+export interface PendingApprovalAccountData {
+  paymentId: number[];
+  mandate: PublicKey;
+  merchant: PublicKey;
+  amount: BN;
+  offerHash: number[];
+  requestedAt: BN;
+  expiresAt: BN;
+  bump: number;
+}
+
 export interface MandateAccountData {
   vault: PublicKey;
   taskId: number[];
@@ -115,6 +126,7 @@ export interface VaultAccountData {
   tokenMint: PublicKey;
   tokenVault: PublicKey;
   isPaused: boolean;
+  allocatedBudget: BN;
   bump: number;
   vaultBump: number;
 }
