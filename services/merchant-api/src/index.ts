@@ -4,9 +4,20 @@ import {
   encodePaymentRequiredHeader,
   decodePaymentSignatureHeader,
 } from "@x402/core/http";
-import { hashBytesToHex } from "@solmandate/verifier";
+import {
+  hashBytesToHex,
+  matchAccountDiscriminator,
+  buildCanonicalOfferHash,
+  SOLMANDATE_PROGRAM_ID,
+  ESCROW_ACCOUNT_DISCRIMINATOR,
+  MANDATE_ACCOUNT_DISCRIMINATOR,
+  PaymentIntent,
+  IPaymentIntentStore,
+  MemoryPaymentIntentStore,
+} from "@solmandate/verifier";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import crypto from "crypto";
 
 export interface EscrowAccountParsed {
   paymentId: Uint8Array;
@@ -89,30 +100,39 @@ export async function verifySolanaExactPayment(
       }
     }
 
-    if (receivedAmount === 0n && tx.transaction.message.instructions) {
-      const merchantAta = getAssociatedTokenAddressSync(expectedMint, merchantPubkey, true).toBase58();
-      for (const ix of tx.transaction.message.instructions) {
-        if ("parsed" in ix && ix.program === "spl-token") {
-          const info = ix.parsed.info;
-          if (info && (ix.parsed.type === "transfer" || ix.parsed.type === "transferChecked")) {
-            if (info.mint && info.mint !== expectedMint.toBase58()) {
-              continue;
-            }
-            if (info.destination === merchantAta) {
-              const amt = BigInt(info.amount || "0");
-              if (amt >= expectedAmount) {
-                receivedAmount = amt;
-              }
-            }
+    // Inspect instruction-level SPL token transfers (top-level and inner CPI)
+    const merchantAta = getAssociatedTokenAddressSync(expectedMint, merchantPubkey, true).toBase58();
+    const allInstructions: any[] = [...(tx.transaction.message.instructions || [])];
+    if (tx.meta?.innerInstructions) {
+      for (const inner of tx.meta.innerInstructions) {
+        if (inner.instructions) {
+          allInstructions.push(...inner.instructions);
+        }
+      }
+    }
+
+    let instructionTransferAmount = 0n;
+    for (const ix of allInstructions) {
+      if ("parsed" in ix && ix.program === "spl-token") {
+        const info = ix.parsed.info;
+        if (info && (ix.parsed.type === "transfer" || ix.parsed.type === "transferChecked")) {
+          if (info.mint && info.mint !== expectedMint.toBase58()) {
+            continue;
+          }
+          if (info.destination === merchantAta) {
+            const amt = BigInt(info.amount || "0");
+            instructionTransferAmount += amt;
           }
         }
       }
     }
 
-    if (receivedAmount < expectedAmount) {
+    const effectiveReceived = receivedAmount > 0n ? receivedAmount : instructionTransferAmount;
+
+    if (effectiveReceived < expectedAmount) {
       return {
         valid: false,
-        error: `Insufficient payment: received ${receivedAmount}, expected >= ${expectedAmount}`,
+        error: `Insufficient payment: received ${effectiveReceived}, expected >= ${expectedAmount}`,
       };
     }
 
@@ -127,7 +147,8 @@ export async function verifySolanaEscrowAccount(
   escrowPda: PublicKey,
   expectedAmount: bigint,
   expectedOfferHashHex: string,
-  merchantPubkey: PublicKey
+  merchantPubkey: PublicKey,
+  programId: PublicKey = new PublicKey(SOLMANDATE_PROGRAM_ID)
 ): Promise<{ valid: boolean; error?: string; escrow?: EscrowAccountParsed }> {
   try {
     const accountInfo = await connection.getAccountInfo(escrowPda, "confirmed");
@@ -135,7 +156,56 @@ export async function verifySolanaEscrowAccount(
       return { valid: false, error: `Escrow account ${escrowPda.toBase58()} does not exist on-chain` };
     }
 
+    // Authenticate account owner against canonical SolMandate program ID
+    if (!accountInfo.owner.equals(programId)) {
+      return {
+        valid: false,
+        error: `Escrow account owner mismatch: expected program ${programId.toBase58()}, got ${accountInfo.owner.toBase58()}`,
+      };
+    }
+
+    // Verify 8-byte Anchor account discriminator
+    if (!matchAccountDiscriminator(accountInfo.data, ESCROW_ACCOUNT_DISCRIMINATOR)) {
+      return {
+        valid: false,
+        error: "Invalid account discriminator: account is not a genuine SolMandate Escrow",
+      };
+    }
+
     const escrow = parseEscrowAccountData(accountInfo.data);
+
+    // Verify PDA equality derived strictly from seeds: [b"escrow", mandate, payment_id]
+    const [expectedPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("escrow"), escrow.mandate.toBuffer(), escrow.paymentId],
+      programId
+    );
+    if (!expectedPda.equals(escrowPda)) {
+      return {
+        valid: false,
+        error: `Escrow PDA derivation mismatch: address ${escrowPda.toBase58()} does not match seeds derivation ${expectedPda.toBase58()}`,
+      };
+    }
+
+    // Verify referenced Mandate account exists and is authentic
+    const mandateAccountInfo = await connection.getAccountInfo(escrow.mandate, "confirmed");
+    if (!mandateAccountInfo) {
+      return {
+        valid: false,
+        error: `Referenced mandate account ${escrow.mandate.toBase58()} does not exist on-chain`,
+      };
+    }
+    if (!mandateAccountInfo.owner.equals(programId)) {
+      return {
+        valid: false,
+        error: `Referenced mandate owner mismatch: expected ${programId.toBase58()}, got ${mandateAccountInfo.owner.toBase58()}`,
+      };
+    }
+    if (!matchAccountDiscriminator(mandateAccountInfo.data, MANDATE_ACCOUNT_DISCRIMINATOR)) {
+      return {
+        valid: false,
+        error: "Invalid mandate account discriminator: not a genuine SolMandate Mandate account",
+      };
+    }
 
     if (escrow.merchant.toBase58() !== merchantPubkey.toBase58()) {
       return {
@@ -144,10 +214,11 @@ export async function verifySolanaEscrowAccount(
       };
     }
 
-    if (escrow.amount < expectedAmount) {
+    // Require strict amount equality
+    if (escrow.amount !== expectedAmount) {
       return {
         valid: false,
-        error: `Escrow amount insufficient: on-chain ${escrow.amount} < expected ${expectedAmount}`,
+        error: `Escrow amount mismatch: on-chain ${escrow.amount} !== expected ${expectedAmount}`,
       };
     }
 
@@ -185,18 +256,22 @@ export interface MerchantConfig {
   tokenMint?: string;
   network?: string;
   connection?: Connection;
+  programId?: PublicKey;
   facilitatorUrl?: string;
+  intentStore?: IPaymentIntentStore;
   verifyPayment?: (params: {
     signature: string;
     expectedAmount: string;
     expectedAsset: string;
     expectedRecipient: string;
+    intentId?: string;
   }) => Promise<{ valid: boolean; error?: string }>;
   verifyEscrow?: (params: {
     escrowPda: string;
     expectedAmount: string;
     expectedOfferHash: string;
     expectedMerchant: string;
+    intentId?: string;
   }) => Promise<{ valid: boolean; error?: string }>;
   onCommitDelivery?: (escrowPda: string, deliveryHash: string) => Promise<string | void>;
   onRefundPayment?: (escrowPda: string) => Promise<string | void>;
@@ -214,6 +289,8 @@ export function createMerchantApp(config: MerchantConfig = {}) {
     process.env.TOKEN_MINT ||
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"; // USDC
   const network = config.network || "solana:devnet";
+  const intentStore = config.intentStore || new MemoryPaymentIntentStore();
+  const programId = config.programId || new PublicKey(SOLMANDATE_PROGRAM_ID);
 
   // Health check
   app.get("/health", (c) => {
@@ -231,6 +308,32 @@ export function createMerchantApp(config: MerchantConfig = {}) {
       c.req.header("payment-signature") || c.req.header("PAYMENT-SIGNATURE");
 
     if (!paymentSigHeader) {
+      const intentId = `intent_exact_${crypto.randomBytes(12).toString("hex")}`;
+      const intent: PaymentIntent = {
+        intentId,
+        scheme: "exact",
+        network,
+        asset: tokenMint,
+        amount: "1000000",
+        payTo: merchantPubkey,
+        resource: c.req.url,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 300 * 1000,
+      };
+      await intentStore.createIntent(intent);
+
+      if (config.facilitatorUrl) {
+        try {
+          await fetch(`${config.facilitatorUrl}/intents`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(intent),
+          });
+        } catch {
+          // Fallback to local intent
+        }
+      }
+
       const paymentRequired = {
         x402Version: 2,
         error: "Payment required to access high-frequency validator telemetry",
@@ -249,6 +352,7 @@ export function createMerchantApp(config: MerchantConfig = {}) {
             maxTimeoutSeconds: 300,
             extra: {
               feed: "telemetry",
+              intentId,
             },
           },
         ],
@@ -292,13 +396,31 @@ export function createMerchantApp(config: MerchantConfig = {}) {
       return c.json({ error: "Missing transaction signature proof in payment payload" }, 400);
     }
 
+    const signature = paymentPayload.payload.signature;
+    const intentId = paymentPayload.accepted?.extra?.intentId;
+
+    // Replay prevention check
+    if (await intentStore.isSettled(signature)) {
+      return c.json(
+        { error: "Payment transaction signature has already been settled (replay detected)" },
+        402
+      );
+    }
+    if (intentId && (await intentStore.isIntentFulfilled(intentId))) {
+      return c.json(
+        { error: `Payment intent ${intentId} has already been fulfilled` },
+        402
+      );
+    }
+
     // Verify payment on-chain
     if (config.verifyPayment) {
       const result = await config.verifyPayment({
-        signature: paymentPayload.payload.signature,
+        signature,
         expectedAmount: "1000000",
         expectedAsset: tokenMint,
         expectedRecipient: merchantPubkey,
+        intentId,
       });
       if (!result.valid) {
         return c.json({ error: result.error || "Payment verification failed" }, 402);
@@ -309,8 +431,9 @@ export function createMerchantApp(config: MerchantConfig = {}) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            intentId,
             scheme: "exact",
-            payment: { signature: paymentPayload.payload.signature },
+            payment: { signature },
             requirements: {
               amount: "1000000",
               asset: tokenMint,
@@ -328,7 +451,7 @@ export function createMerchantApp(config: MerchantConfig = {}) {
     } else if (config.connection) {
       const result = await verifySolanaExactPayment(
         config.connection,
-        paymentPayload.payload.signature,
+        signature,
         1000000n,
         new PublicKey(tokenMint),
         new PublicKey(merchantPubkey)
@@ -338,6 +461,12 @@ export function createMerchantApp(config: MerchantConfig = {}) {
       }
     }
 
+    // Record settlement in idempotency store to prevent replay
+    const settleRes = await intentStore.recordSettlement(signature, intentId);
+    if (!settleRes.success) {
+      return c.json({ error: settleRes.error }, 402);
+    }
+
     return c.json({
       success: true,
       service: "Solana Validator Telemetry",
@@ -345,7 +474,7 @@ export function createMerchantApp(config: MerchantConfig = {}) {
         { validator: "Vote111...", slot: 294819001, tps: 2854, healthy: true },
         { validator: "Vote222...", slot: 294819002, tps: 2860, healthy: true },
       ],
-      paymentProof: paymentPayload.payload.signature,
+      paymentProof: signature,
       mandate: c.req.header("x-solmandate-mandate") || "verified",
       agentTrace: c.req.header("x-agent-trace") || null,
     });
@@ -357,6 +486,32 @@ export function createMerchantApp(config: MerchantConfig = {}) {
       c.req.header("payment-signature") || c.req.header("PAYMENT-SIGNATURE");
 
     if (!paymentSigHeader) {
+      const intentId = `intent_post_${crypto.randomBytes(12).toString("hex")}`;
+      const intent: PaymentIntent = {
+        intentId,
+        scheme: "exact",
+        network,
+        asset: tokenMint,
+        amount: "1000000",
+        payTo: merchantPubkey,
+        resource: c.req.url,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 300 * 1000,
+      };
+      await intentStore.createIntent(intent);
+
+      if (config.facilitatorUrl) {
+        try {
+          await fetch(`${config.facilitatorUrl}/intents`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(intent),
+          });
+        } catch {
+          // Fallback
+        }
+      }
+
       const paymentRequired = {
         x402Version: 2,
         error: "Payment required for POST echo service",
@@ -373,6 +528,9 @@ export function createMerchantApp(config: MerchantConfig = {}) {
             amount: "1000000",
             payTo: merchantPubkey,
             maxTimeoutSeconds: 300,
+            extra: {
+              intentId,
+            },
           },
         ],
       };
@@ -400,12 +558,23 @@ export function createMerchantApp(config: MerchantConfig = {}) {
       return c.json({ error: "Missing signature" }, 400);
     }
 
+    const signature = paymentPayload.payload.signature;
+    const intentId = paymentPayload.accepted?.extra?.intentId;
+
+    if (await intentStore.isSettled(signature)) {
+      return c.json({ error: "Payment transaction signature already settled (replay detected)" }, 402);
+    }
+    if (intentId && (await intentStore.isIntentFulfilled(intentId))) {
+      return c.json({ error: `Payment intent ${intentId} already fulfilled` }, 402);
+    }
+
     if (config.verifyPayment) {
       const result = await config.verifyPayment({
-        signature: paymentPayload.payload.signature,
+        signature,
         expectedAmount: "1000000",
         expectedAsset: tokenMint,
         expectedRecipient: merchantPubkey,
+        intentId,
       });
       if (!result.valid) {
         return c.json({ error: result.error || "Payment verification failed" }, 402);
@@ -416,8 +585,9 @@ export function createMerchantApp(config: MerchantConfig = {}) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            intentId,
             scheme: "exact",
-            payment: { signature: paymentPayload.payload.signature },
+            payment: { signature },
             requirements: {
               amount: "1000000",
               asset: tokenMint,
@@ -435,15 +605,17 @@ export function createMerchantApp(config: MerchantConfig = {}) {
     } else if (config.connection) {
       const result = await verifySolanaExactPayment(
         config.connection,
-        paymentPayload.payload.signature,
+        signature,
         1000000n,
         new PublicKey(tokenMint),
         new PublicKey(merchantPubkey)
       );
       if (!result.valid) {
-        return c.json({ error: result.error || "Payment verification failed" }, 402);
+        return c.json({ error: "Payment verification failed" }, 402);
       }
     }
+
+    await intentStore.recordSettlement(signature, intentId);
 
     let bodyText = "";
     try {
@@ -489,7 +661,11 @@ export function createMerchantApp(config: MerchantConfig = {}) {
 
   // Mode 2: Escrow / Pay-on-success endpoint
   app.get("/api/data/escrow", async (c) => {
-    const canonicalOfferHash = hashBytesToHex("job:audit_verification:/api/data/escrow:2000000");
+    const canonicalOfferHash = buildCanonicalOfferHash({
+      resource: "/api/data/escrow",
+      jobType: "audit_verification",
+      amount: "2000000",
+    });
 
     const paymentSigHeader =
       c.req.header("payment-signature") || c.req.header("PAYMENT-SIGNATURE");
@@ -502,6 +678,33 @@ export function createMerchantApp(config: MerchantConfig = {}) {
       c.req.query("simulate") === "corrupt_data";
 
     if (!paymentSigHeader) {
+      const intentId = `intent_escrow_${crypto.randomBytes(12).toString("hex")}`;
+      const intent: PaymentIntent = {
+        intentId,
+        scheme: "escrow",
+        network,
+        asset: tokenMint,
+        amount: "2000000",
+        payTo: merchantPubkey,
+        offerHash: canonicalOfferHash,
+        resource: c.req.url,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 3600 * 1000,
+      };
+      await intentStore.createIntent(intent);
+
+      if (config.facilitatorUrl) {
+        try {
+          await fetch(`${config.facilitatorUrl}/intents`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(intent),
+          });
+        } catch {
+          // Fallback
+        }
+      }
+
       const paymentRequired = {
         x402Version: 2,
         error: "Escrow reservation required for AI code verification analysis",
@@ -521,6 +724,7 @@ export function createMerchantApp(config: MerchantConfig = {}) {
             extra: {
               jobType: "audit_verification",
               offerHash: canonicalOfferHash,
+              intentId,
             },
           },
         ],
@@ -570,6 +774,22 @@ export function createMerchantApp(config: MerchantConfig = {}) {
       return c.json({ error: "Missing escrow account in payment signature" }, 400);
     }
 
+    const intentId = paymentPayload.accepted?.extra?.intentId;
+
+    // Replay prevention check
+    if (await intentStore.isSettled(escrowPda)) {
+      return c.json(
+        { error: `Escrow account ${escrowPda} has already been settled (replay detected)` },
+        402
+      );
+    }
+    if (intentId && (await intentStore.isIntentFulfilled(intentId))) {
+      return c.json(
+        { error: `Payment intent ${intentId} has already been fulfilled` },
+        402
+      );
+    }
+
     // Independently verify on-chain escrow account before processing
     if (config.verifyEscrow) {
       const result = await config.verifyEscrow({
@@ -577,6 +797,7 @@ export function createMerchantApp(config: MerchantConfig = {}) {
         expectedAmount: "2000000",
         expectedOfferHash: canonicalOfferHash,
         expectedMerchant: merchantPubkey,
+        intentId,
       });
       if (!result.valid) {
         return c.json({ error: result.error || "Escrow verification failed" }, 400);
@@ -587,6 +808,7 @@ export function createMerchantApp(config: MerchantConfig = {}) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            intentId,
             scheme: "escrow",
             payment: { escrowPda },
             requirements: {
@@ -610,7 +832,8 @@ export function createMerchantApp(config: MerchantConfig = {}) {
         new PublicKey(escrowPda),
         2000000n,
         canonicalOfferHash,
-        new PublicKey(merchantPubkey)
+        new PublicKey(merchantPubkey),
+        programId
       );
       if (!result.valid) {
         return c.json({ error: result.error || "On-chain escrow verification failed" }, 400);
@@ -671,6 +894,9 @@ export function createMerchantApp(config: MerchantConfig = {}) {
         );
       }
     }
+
+    // Record settlement in idempotency store
+    await intentStore.recordSettlement(escrowPda, intentId);
 
     c.header("X-Solmandate-Delivery-Hash", deliveryHash);
     c.header("x-solmandate-delivery-hash", deliveryHash);

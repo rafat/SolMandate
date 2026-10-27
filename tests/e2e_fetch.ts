@@ -40,9 +40,9 @@ describe("SolMandate E2E: x402 Client + Merchant + On-Chain Program", () => {
   const taskId = Array.from(
     crypto.createHash("sha256").update("e2e-agent-task-001").digest()
   );
-  const totalBudget = new anchor.BN(15_000_000); // 15 USDC
+  const totalBudget = new anchor.BN(50_000_000); // 50 USDC
   const maxPayment = new anchor.BN(5_000_000); // 5 USDC cap
-  const maxPurchases = 20;
+  const maxPurchases = 50;
   const approvalThreshold = new anchor.BN(5_000_000);
   const expiresAt = new anchor.BN(Math.floor(Date.now() / 1000) + 86400);
 
@@ -85,14 +85,14 @@ describe("SolMandate E2E: x402 Client + Merchant + On-Chain Program", () => {
       merchant.publicKey
     );
 
-    // 4. Mint 50 USDC to owner
+    // 4. Mint 100 USDC to owner
     await mintTo(
       provider.connection,
       owner,
       tokenMint,
       ownerTokenAccount,
       owner,
-      50_000_000
+      100_000_000
     );
 
     // 5. Initialize Vault
@@ -125,9 +125,9 @@ describe("SolMandate E2E: x402 Client + Merchant + On-Chain Program", () => {
       .signers([owner])
       .rpc();
 
-    // 6. Fund Vault with 20 USDC
+    // 6. Fund Vault with 50 USDC
     await program.methods
-      .deposit(new anchor.BN(20_000_000))
+      .deposit(new anchor.BN(50_000_000))
       .accounts({
         funder: owner.publicKey,
         vault: vaultPda,
@@ -617,10 +617,344 @@ describe("SolMandate E2E: x402 Client + Merchant + On-Chain Program", () => {
         },
       }),
     });
-    const mismatchRes = await facilitatorApp.fetch(mismatchReq);
+    const facilitatorApp2 = createFacilitatorApp({
+      connection: provider.connection,
+    });
+    const mismatchRes = await facilitatorApp2.fetch(mismatchReq);
     expect(mismatchRes.status).to.equal(400);
     const mismatchBody = await mismatchRes.json();
     expect(mismatchBody.valid).to.be.false;
     expect(mismatchBody.error).to.include("Escrow offer hash mismatch");
+  });
+
+  it("11. Replay attack rejection: settled signatures and escrow accounts cannot be replayed", async () => {
+    const facilitatorApp = createFacilitatorApp({
+      connection: provider.connection,
+      network: "solana:localnet",
+    });
+
+    const paymentId = Array.from(crypto.createHash("sha256").update("replay-test-sig").digest());
+    const validTxSig = await sdkClient.payExact({
+      mandatePda,
+      merchant: merchant.publicKey,
+      merchantTokenAccount,
+      amount: 1_000_000n,
+      paymentId,
+    });
+    await provider.connection.confirmTransaction(validTxSig, "confirmed");
+
+    // First verification succeeds
+    const req1 = new Request("http://localhost:4021/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheme: "exact",
+        payment: { signature: validTxSig },
+        requirements: {
+          amount: "1000000",
+          asset: tokenMint.toBase58(),
+          payTo: merchant.publicKey.toBase58(),
+        },
+      }),
+    });
+    const res1 = await facilitatorApp.fetch(req1);
+    expect(res1.status).to.equal(200);
+
+    // Second verification with identical signature is rejected as replay
+    const req2 = new Request("http://localhost:4021/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheme: "exact",
+        payment: { signature: validTxSig },
+        requirements: {
+          amount: "1000000",
+          asset: tokenMint.toBase58(),
+          payTo: merchant.publicKey.toBase58(),
+        },
+      }),
+    });
+    const res2 = await facilitatorApp.fetch(req2);
+    expect(res2.status).to.equal(400);
+    const body2 = await res2.json();
+    expect(body2.valid).to.be.false;
+    expect(body2.error).to.include("replay detected");
+
+    // Escrow replay rejection test
+    const escrowPaymentId = Array.from(crypto.createHash("sha256").update("replay-escrow-sig").digest());
+    const offerHashHex = "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff";
+    const [replayEscrowPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("escrow"), mandatePda.toBuffer(), Buffer.from(escrowPaymentId)],
+      program.programId
+    );
+    await program.methods
+      .requestPayment(escrowPaymentId, new anchor.BN(1_000_000), Array.from(Buffer.from(offerHashHex, "hex")), new anchor.BN(Math.floor(Date.now() / 1000) + 3600))
+      .accounts({
+        agent: agent.publicKey,
+        vault: vaultPda,
+        mandate: mandatePda,
+        merchant: merchant.publicKey,
+        escrow: replayEscrowPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([agent])
+      .rpc();
+
+    const escrowReq1 = new Request("http://localhost:4021/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheme: "escrow",
+        payment: { escrowPda: replayEscrowPda.toBase58() },
+        requirements: {
+          amount: "1000000",
+          asset: tokenMint.toBase58(),
+          payTo: merchant.publicKey.toBase58(),
+          extra: { offerHash: offerHashHex },
+        },
+      }),
+    });
+    const escrowRes1 = await facilitatorApp.fetch(escrowReq1);
+    expect(escrowRes1.status).to.equal(200);
+
+    // Second verification with identical escrowPda is rejected as replay
+    const escrowReq2 = new Request("http://localhost:4021/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheme: "escrow",
+        payment: { escrowPda: replayEscrowPda.toBase58() },
+        requirements: {
+          amount: "1000000",
+          asset: tokenMint.toBase58(),
+          payTo: merchant.publicKey.toBase58(),
+          extra: { offerHash: offerHashHex },
+        },
+      }),
+    });
+    const escrowRes2 = await facilitatorApp.fetch(escrowReq2);
+    expect(escrowRes2.status).to.equal(400);
+    const escrowBody2 = await escrowRes2.json();
+    expect(escrowBody2.valid).to.be.false;
+    expect(escrowBody2.error).to.include("replay detected");
+  });
+
+  it("12. Escrow account authentication rejection: forged accounts with wrong owner or discriminator fail", async () => {
+    const facilitatorApp = createFacilitatorApp({
+      connection: provider.connection,
+      network: "solana:localnet",
+    });
+
+    // Case A: Forged account owned by System Program instead of SolMandate program
+    const forgedSystemAccount = Keypair.generate();
+    const rentLamports = await provider.connection.getMinimumBalanceForRentExemption(186);
+    const createTxA = new anchor.web3.Transaction().add(
+      SystemProgram.createAccount({
+        fromPubkey: owner.publicKey,
+        newAccountPubkey: forgedSystemAccount.publicKey,
+        lamports: rentLamports,
+        space: 186,
+        programId: SystemProgram.programId,
+      })
+    );
+    await provider.sendAndConfirm(createTxA, [owner, forgedSystemAccount]);
+
+    const reqWrongOwner = new Request("http://localhost:4021/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheme: "escrow",
+        payment: { escrowPda: forgedSystemAccount.publicKey.toBase58() },
+        requirements: {
+          amount: "1500000",
+          asset: tokenMint.toBase58(),
+          payTo: merchant.publicKey.toBase58(),
+        },
+      }),
+    });
+    const resWrongOwner = await facilitatorApp.fetch(reqWrongOwner);
+    expect(resWrongOwner.status).to.equal(400);
+    const bodyWrongOwner = await resWrongOwner.json();
+    expect(bodyWrongOwner.valid).to.be.false;
+    expect(bodyWrongOwner.error).to.include("Escrow account owner mismatch");
+
+    // Case B: Forged account owned by SolMandate program but with zeroed / invalid discriminator
+    const forgedProgramAccount = Keypair.generate();
+    const createTxB = new anchor.web3.Transaction().add(
+      SystemProgram.createAccount({
+        fromPubkey: owner.publicKey,
+        newAccountPubkey: forgedProgramAccount.publicKey,
+        lamports: rentLamports,
+        space: 186,
+        programId: program.programId,
+      })
+    );
+    await provider.sendAndConfirm(createTxB, [owner, forgedProgramAccount]);
+
+    const reqWrongDisc = new Request("http://localhost:4021/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheme: "escrow",
+        payment: { escrowPda: forgedProgramAccount.publicKey.toBase58() },
+        requirements: {
+          amount: "1500000",
+          asset: tokenMint.toBase58(),
+          payTo: merchant.publicKey.toBase58(),
+        },
+      }),
+    });
+    const resWrongDisc = await facilitatorApp.fetch(reqWrongDisc);
+    expect(resWrongDisc.status).to.equal(400);
+    const bodyWrongDisc = await resWrongDisc.json();
+    expect(bodyWrongDisc.valid).to.be.false;
+    expect(bodyWrongDisc.error).to.include("Invalid account discriminator");
+  });
+
+  it("13. Facilitator intent binding & network enforcement: tamper rejection and network mismatch", async () => {
+    const facilitatorApp = createFacilitatorApp({
+      connection: provider.connection,
+      network: "solana:localnet",
+      supportedNetworks: ["solana:localnet"],
+    });
+
+    // 13a. Network mismatch rejection
+    const netMismatchReq = new Request("http://localhost:4021/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheme: "exact",
+        network: "solana:mainnet",
+        payment: { signature: "mock_signature" },
+        requirements: {
+          amount: "1000000",
+          asset: tokenMint.toBase58(),
+          payTo: merchant.publicKey.toBase58(),
+        },
+      }),
+    });
+    const netMismatchRes = await facilitatorApp.fetch(netMismatchReq);
+    expect(netMismatchRes.status).to.equal(400);
+    const netMismatchBody = await netMismatchRes.json();
+    expect(netMismatchBody.valid).to.be.false;
+    expect(netMismatchBody.error).to.include("Network mismatch");
+
+    // 13b. Intent registration and caller tamper prevention
+    const intentId = "intent-audit-job-999";
+    const registerIntentReq = new Request("http://localhost:4021/intents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        intentId,
+        scheme: "exact",
+        network: "solana:localnet",
+        asset: tokenMint.toBase58(),
+        amount: "5000000", // Requires 5 USDC
+        payTo: merchant.publicKey.toBase58(),
+      }),
+    });
+    const regRes = await facilitatorApp.fetch(registerIntentReq);
+    expect(regRes.status).to.equal(201);
+
+    // Payer sends 1 USDC transaction against intent requiring 5 USDC (even if payer attempts to claim amount: 1000000)
+    const exactPaymentId = Array.from(crypto.createHash("sha256").update("intent-tamper-test").digest());
+    const txSig1Usdc = await sdkClient.payExact({
+      mandatePda,
+      merchant: merchant.publicKey,
+      merchantTokenAccount,
+      amount: 1_000_000n,
+      paymentId: exactPaymentId,
+    });
+    await provider.connection.confirmTransaction(txSig1Usdc, "confirmed");
+
+    const tamperedReq = new Request("http://localhost:4021/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        intentId,
+        payment: { signature: txSig1Usdc },
+        requirements: {
+          amount: "1000000", // Payer tries to claim it only requires 1 USDC
+        },
+      }),
+    });
+    const tamperedRes = await facilitatorApp.fetch(tamperedReq);
+    expect(tamperedRes.status).to.equal(400);
+    const tamperedBody = await tamperedRes.json();
+    expect(tamperedBody.valid).to.be.false;
+    expect(tamperedBody.error).to.include("Insufficient payment");
+  });
+
+  it("14. Escrow strict amount mismatch: non-matching amounts (over or under) are strictly rejected", async () => {
+    const facilitatorApp = createFacilitatorApp({
+      connection: provider.connection,
+      network: "solana:localnet",
+    });
+
+    const paymentId = Array.from(crypto.createHash("sha256").update("escrow-exact-amount-test").digest());
+    const offerHashHex = "99887766554433221100aabbccddeeff99887766554433221100aabbccddeeff";
+    const offerHash = Array.from(Buffer.from(offerHashHex, "hex"));
+    const amount = new anchor.BN(1_500_000); // 1.5 USDC
+    const deadline = new anchor.BN(Math.floor(Date.now() / 1000) + 3600);
+
+    const [escrowPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("escrow"), mandatePda.toBuffer(), Buffer.from(paymentId)],
+      program.programId
+    );
+
+    await program.methods
+      .requestPayment(paymentId, amount, offerHash, deadline)
+      .accounts({
+        agent: agent.publicKey,
+        vault: vaultPda,
+        mandate: mandatePda,
+        merchant: merchant.publicKey,
+        escrow: escrowPda,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([agent])
+      .rpc();
+
+    // 14a. Rejection when requirement is 2.0 USDC (underpayment)
+    const underpayReq = new Request("http://localhost:4021/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheme: "escrow",
+        payment: { escrowPda: escrowPda.toBase58() },
+        requirements: {
+          amount: "2000000",
+          asset: tokenMint.toBase58(),
+          payTo: merchant.publicKey.toBase58(),
+          extra: { offerHash: offerHashHex },
+        },
+      }),
+    });
+    const underpayRes = await facilitatorApp.fetch(underpayReq);
+    expect(underpayRes.status).to.equal(400);
+    const underpayBody = await underpayRes.json();
+    expect(underpayBody.valid).to.be.false;
+    expect(underpayBody.error).to.include("Escrow amount mismatch");
+
+    // 14b. Rejection when requirement is 1.0 USDC (strict equality enforcement)
+    const overpayReq = new Request("http://localhost:4021/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheme: "escrow",
+        payment: { escrowPda: escrowPda.toBase58() },
+        requirements: {
+          amount: "1000000",
+          asset: tokenMint.toBase58(),
+          payTo: merchant.publicKey.toBase58(),
+          extra: { offerHash: offerHashHex },
+        },
+      }),
+    });
+    const overpayRes = await facilitatorApp.fetch(overpayReq);
+    expect(overpayRes.status).to.equal(400);
+    const overpayBody = await overpayRes.json();
+    expect(overpayBody.valid).to.be.false;
+    expect(overpayBody.error).to.include("Escrow amount mismatch");
   });
 });

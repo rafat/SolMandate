@@ -2,7 +2,16 @@ import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { hashBytesToHex } from "@solmandate/verifier";
+import {
+  hashBytesToHex,
+  matchAccountDiscriminator,
+  SOLMANDATE_PROGRAM_ID,
+  ESCROW_ACCOUNT_DISCRIMINATOR,
+  MANDATE_ACCOUNT_DISCRIMINATOR,
+  PaymentIntent,
+  IPaymentIntentStore,
+  MemoryPaymentIntentStore,
+} from "@solmandate/verifier";
 
 export interface EscrowAccountParsed {
   paymentId: Uint8Array;
@@ -85,30 +94,39 @@ export async function verifyExactPayment(
       }
     }
 
-    if (receivedAmount === 0n && tx.transaction.message.instructions) {
-      const merchantAta = getAssociatedTokenAddressSync(expectedMint, merchantPubkey, true).toBase58();
-      for (const ix of tx.transaction.message.instructions) {
-        if ("parsed" in ix && ix.program === "spl-token") {
-          const info = ix.parsed.info;
-          if (info && (ix.parsed.type === "transfer" || ix.parsed.type === "transferChecked")) {
-            if (info.mint && info.mint !== expectedMint.toBase58()) {
-              continue;
-            }
-            if (info.destination === merchantAta) {
-              const amt = BigInt(info.amount || "0");
-              if (amt >= expectedAmount) {
-                receivedAmount = amt;
-              }
-            }
+    // Inspect instruction-level SPL token transfers (top-level and inner CPI)
+    const merchantAta = getAssociatedTokenAddressSync(expectedMint, merchantPubkey, true).toBase58();
+    const allInstructions: any[] = [...(tx.transaction.message.instructions || [])];
+    if (tx.meta?.innerInstructions) {
+      for (const inner of tx.meta.innerInstructions) {
+        if (inner.instructions) {
+          allInstructions.push(...inner.instructions);
+        }
+      }
+    }
+
+    let instructionTransferAmount = 0n;
+    for (const ix of allInstructions) {
+      if ("parsed" in ix && ix.program === "spl-token") {
+        const info = ix.parsed.info;
+        if (info && (ix.parsed.type === "transfer" || ix.parsed.type === "transferChecked")) {
+          if (info.mint && info.mint !== expectedMint.toBase58()) {
+            continue;
+          }
+          if (info.destination === merchantAta) {
+            const amt = BigInt(info.amount || "0");
+            instructionTransferAmount += amt;
           }
         }
       }
     }
 
-    if (receivedAmount < expectedAmount) {
+    const effectiveReceived = receivedAmount > 0n ? receivedAmount : instructionTransferAmount;
+
+    if (effectiveReceived < expectedAmount) {
       return {
         valid: false,
-        error: `Insufficient payment: received ${receivedAmount}, expected >= ${expectedAmount}`,
+        error: `Insufficient payment: received ${effectiveReceived}, expected >= ${expectedAmount}`,
       };
     }
 
@@ -117,7 +135,7 @@ export async function verifyExactPayment(
       txDetails: {
         slot: tx.slot,
         blockTime: tx.blockTime,
-        receivedAmount: receivedAmount.toString(),
+        receivedAmount: effectiveReceived.toString(),
         merchant: merchantPubkey.toBase58(),
         mint: expectedMint.toBase58(),
       },
@@ -132,7 +150,8 @@ export async function verifyEscrowAccount(
   escrowPda: PublicKey,
   expectedAmount: bigint,
   expectedOfferHashHex: string,
-  merchantPubkey: PublicKey
+  merchantPubkey: PublicKey,
+  programId: PublicKey = new PublicKey(SOLMANDATE_PROGRAM_ID)
 ): Promise<{ valid: boolean; error?: string; escrow?: EscrowAccountParsed }> {
   try {
     const accountInfo = await connection.getAccountInfo(escrowPda, "confirmed");
@@ -140,7 +159,56 @@ export async function verifyEscrowAccount(
       return { valid: false, error: `Escrow account ${escrowPda.toBase58()} does not exist on-chain` };
     }
 
+    // Authenticate account owner against canonical SolMandate program ID
+    if (!accountInfo.owner.equals(programId)) {
+      return {
+        valid: false,
+        error: `Escrow account owner mismatch: expected program ${programId.toBase58()}, got ${accountInfo.owner.toBase58()}`,
+      };
+    }
+
+    // Verify 8-byte Anchor account discriminator
+    if (!matchAccountDiscriminator(accountInfo.data, ESCROW_ACCOUNT_DISCRIMINATOR)) {
+      return {
+        valid: false,
+        error: "Invalid account discriminator: account is not a genuine SolMandate Escrow",
+      };
+    }
+
     const escrow = parseEscrowAccountData(accountInfo.data);
+
+    // Verify PDA equality derived strictly from seeds: [b"escrow", mandate, payment_id]
+    const [expectedPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("escrow"), escrow.mandate.toBuffer(), escrow.paymentId],
+      programId
+    );
+    if (!expectedPda.equals(escrowPda)) {
+      return {
+        valid: false,
+        error: `Escrow PDA derivation mismatch: address ${escrowPda.toBase58()} does not match seeds derivation ${expectedPda.toBase58()}`,
+      };
+    }
+
+    // Verify referenced Mandate account exists and is authentic
+    const mandateAccountInfo = await connection.getAccountInfo(escrow.mandate, "confirmed");
+    if (!mandateAccountInfo) {
+      return {
+        valid: false,
+        error: `Referenced mandate account ${escrow.mandate.toBase58()} does not exist on-chain`,
+      };
+    }
+    if (!mandateAccountInfo.owner.equals(programId)) {
+      return {
+        valid: false,
+        error: `Referenced mandate owner mismatch: expected ${programId.toBase58()}, got ${mandateAccountInfo.owner.toBase58()}`,
+      };
+    }
+    if (!matchAccountDiscriminator(mandateAccountInfo.data, MANDATE_ACCOUNT_DISCRIMINATOR)) {
+      return {
+        valid: false,
+        error: "Invalid mandate account discriminator: not a genuine SolMandate Mandate account",
+      };
+    }
 
     if (escrow.merchant.toBase58() !== merchantPubkey.toBase58()) {
       return {
@@ -149,10 +217,11 @@ export async function verifyEscrowAccount(
       };
     }
 
-    if (escrow.amount < expectedAmount) {
+    // Require strict amount equality
+    if (escrow.amount !== expectedAmount) {
       return {
         valid: false,
-        error: `Escrow amount insufficient: on-chain ${escrow.amount} < expected ${expectedAmount}`,
+        error: `Escrow amount mismatch: on-chain ${escrow.amount} !== expected ${expectedAmount}`,
       };
     }
 
@@ -188,7 +257,10 @@ export async function verifyEscrowAccount(
 export interface FacilitatorConfig {
   connection?: Connection;
   rpcUrl?: string;
+  network?: string;
   supportedNetworks?: string[];
+  programId?: PublicKey;
+  intentStore?: IPaymentIntentStore;
 }
 
 export function createFacilitatorApp(config: FacilitatorConfig = {}) {
@@ -201,20 +273,62 @@ export function createFacilitatorApp(config: FacilitatorConfig = {}) {
       "confirmed"
     );
 
-  const supportedNetworks = config.supportedNetworks || [
-    "solana:localnet",
-    "solana:devnet",
-    "solana:mainnet",
-  ];
+  const configuredNetwork = config.network || process.env.SOLANA_NETWORK || "solana:devnet";
+  const supportedNetworks = config.supportedNetworks || [configuredNetwork];
+  const programId = config.programId || new PublicKey(SOLMANDATE_PROGRAM_ID);
+  const intentStore = config.intentStore || new MemoryPaymentIntentStore();
 
   app.get("/health", (c) => {
     return c.json({
       status: "ok",
       service: "SolMandate Facilitator",
+      network: configuredNetwork,
       supportedNetworks,
       supportedSchemes: ["exact", "escrow"],
       uptime: process.uptime(),
     });
+  });
+
+  // Merchant registers payment intent
+  app.post("/intents", async (c) => {
+    let body: any;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ success: false, error: "Invalid JSON body" }, 400);
+    }
+
+    if (!body.intentId || !body.scheme || !body.asset || !body.amount || !body.payTo) {
+      return c.json(
+        { success: false, error: "Missing required intent fields (intentId, scheme, asset, amount, payTo)" },
+        400
+      );
+    }
+
+    const net = body.network || configuredNetwork;
+    if (net !== configuredNetwork && !supportedNetworks.includes(net)) {
+      return c.json(
+        { success: false, error: `Network mismatch: ${net} is not supported by this facilitator` },
+        400
+      );
+    }
+
+    const intent: PaymentIntent = {
+      intentId: body.intentId,
+      scheme: body.scheme,
+      network: net,
+      asset: body.asset,
+      amount: body.amount.toString(),
+      payTo: body.payTo,
+      offerHash: body.offerHash,
+      resource: body.resource,
+      maxTimeoutSeconds: body.maxTimeoutSeconds,
+      createdAt: body.createdAt || Date.now(),
+      expiresAt: body.expiresAt || Date.now() + 3600 * 1000,
+    };
+
+    await intentStore.createIntent(intent);
+    return c.json({ success: true, intentId: intent.intentId }, 201);
   });
 
   app.post("/verify", async (c) => {
@@ -225,9 +339,53 @@ export function createFacilitatorApp(config: FacilitatorConfig = {}) {
       return c.json({ valid: false, error: "Invalid JSON body" }, 400);
     }
 
-    const scheme = body.scheme || body.accepted?.scheme;
+    const intentId =
+      body.intentId ||
+      body.payment?.intentId ||
+      body.requirements?.extra?.intentId ||
+      body.requirements?.intentId;
+
+    let scheme = body.scheme || body.accepted?.scheme;
     const payment = body.payment || body.payload;
-    const requirements = body.requirements || body.accepted;
+    let requirements = body.requirements || body.accepted;
+
+    // Network validation
+    const requestedNetwork = body.network || requirements?.network;
+    if (
+      requestedNetwork &&
+      requestedNetwork !== configuredNetwork &&
+      !supportedNetworks.includes(requestedNetwork)
+    ) {
+      return c.json(
+        {
+          valid: false,
+          error: `Network mismatch: requested network '${requestedNetwork}' is not supported by this facilitator (configured: ${configuredNetwork})`,
+        },
+        400
+      );
+    }
+
+    // Intent binding: if intentId is supplied, retrieve and strictly enforce the registered intent
+    let matchedIntent: PaymentIntent | undefined;
+    if (intentId) {
+      matchedIntent = await intentStore.getIntent(intentId);
+      if (!matchedIntent) {
+        return c.json(
+          { valid: false, error: `Payment intent '${intentId}' not found or expired` },
+          400
+        );
+      }
+      scheme = matchedIntent.scheme;
+      requirements = {
+        amount: matchedIntent.amount,
+        asset: matchedIntent.asset,
+        payTo: matchedIntent.payTo,
+        extra: {
+          offerHash: matchedIntent.offerHash,
+          intentId: matchedIntent.intentId,
+        },
+      };
+    }
 
     if (!scheme || !payment || !requirements) {
       return c.json(
@@ -238,6 +396,27 @@ export function createFacilitatorApp(config: FacilitatorConfig = {}) {
 
     if (scheme === "exact") {
       const signature = payment.signature || payment;
+      if (typeof signature !== "string" || !signature) {
+        return c.json({ valid: false, error: "Missing or invalid payment signature" }, 400);
+      }
+
+      // Replay prevention check
+      if (await intentStore.isSettled(signature)) {
+        return c.json(
+          {
+            valid: false,
+            error: `Payment signature ${signature} has already been settled (replay detected)`,
+          },
+          400
+        );
+      }
+      if (intentId && (await intentStore.isIntentFulfilled(intentId))) {
+        return c.json(
+          { valid: false, error: `Payment intent ${intentId} has already been fulfilled` },
+          400
+        );
+      }
+
       const expectedAmount = BigInt(requirements.amount || "0");
       const expectedMint = new PublicKey(requirements.asset);
       const merchantPubkey = new PublicKey(requirements.payTo);
@@ -250,9 +429,40 @@ export function createFacilitatorApp(config: FacilitatorConfig = {}) {
         merchantPubkey
       );
 
-      return c.json(result, result.valid ? 200 : 400);
+      if (!result.valid) {
+        return c.json(result, 400);
+      }
+
+      // Record settlement to prevent replay
+      const recordRes = await intentStore.recordSettlement(signature, intentId);
+      if (!recordRes.success) {
+        return c.json({ valid: false, error: recordRes.error }, 400);
+      }
+
+      return c.json(result, 200);
     } else if (scheme === "escrow") {
       const escrowPdaStr = payment.escrowPda || payment;
+      if (typeof escrowPdaStr !== "string" || !escrowPdaStr) {
+        return c.json({ valid: false, error: "Missing or invalid escrowPda" }, 400);
+      }
+
+      // Replay prevention check on escrow PDA
+      if (await intentStore.isSettled(escrowPdaStr)) {
+        return c.json(
+          {
+            valid: false,
+            error: `Escrow account ${escrowPdaStr} has already been settled (replay detected)`,
+          },
+          400
+        );
+      }
+      if (intentId && (await intentStore.isIntentFulfilled(intentId))) {
+        return c.json(
+          { valid: false, error: `Payment intent ${intentId} has already been fulfilled` },
+          400
+        );
+      }
+
       const escrowPda = new PublicKey(escrowPdaStr);
       const expectedAmount = BigInt(requirements.amount || "0");
       const expectedOfferHash =
@@ -266,13 +476,29 @@ export function createFacilitatorApp(config: FacilitatorConfig = {}) {
         escrowPda,
         expectedAmount,
         expectedOfferHash,
-        merchantPubkey
+        merchantPubkey,
+        programId
       );
+
+      if (!result.valid) {
+        return c.json(
+          {
+            valid: false,
+            error: result.error,
+          },
+          400
+        );
+      }
+
+      // Record settlement to prevent replay
+      const recordRes = await intentStore.recordSettlement(escrowPdaStr, intentId);
+      if (!recordRes.success) {
+        return c.json({ valid: false, error: recordRes.error }, 400);
+      }
 
       return c.json(
         {
-          valid: result.valid,
-          error: result.error,
+          valid: true,
           escrow: result.escrow
             ? {
                 paymentId: Buffer.from(result.escrow.paymentId).toString("hex"),
@@ -287,7 +513,7 @@ export function createFacilitatorApp(config: FacilitatorConfig = {}) {
               }
             : undefined,
         },
-        result.valid ? 200 : 400
+        200
       );
     } else {
       return c.json({ valid: false, error: `Unsupported scheme: ${scheme}` }, 400);
